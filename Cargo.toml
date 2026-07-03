@@ -70,3 +70,20 @@ containers = ["docker-sync", "k8s-sync"]
 warpten = ["warp10"]
 prometheuspush = ["isahc"]
 qemu = []
+
+[package.metadata.deb]
+maintainer = "Jaime Iglesias Blanco <iglesias@ifca.es>"
+copyright = "2020, The scaphandre authors"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Custom IFCA Advanced Computing build of Scaphandre, an electric power/energy \
+consumption monitoring agent."""
+depends = "$auto"
+section = "utils"
+priority = "optional"
+default-features = false
+features = ["prometheus", "warpten", "json", "containers", "prometheuspush", "qemu"]
+assets = [
+    ["target/release/scaphandre", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/scaphandre/README", "644"],
+]
