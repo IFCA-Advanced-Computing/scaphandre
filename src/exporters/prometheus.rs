@@ -93,11 +93,16 @@ impl Exporter for PrometheusExporter {
     }
 }
 
-/// Contains a mutex holding a MetricGenerator.
-/// Used to pass the topology data from one http worker to another.
+/// Contains a mutex holding a MetricGenerator, plus the timestamp of the last
+/// topology refresh. Used to pass the topology data from one http worker to
+/// another. last_request and metric_generator share a single mutex so that
+/// concurrent requests can't both observe a stale last_request and both
+/// decide to refresh -- that race let two refreshes land a few milliseconds
+/// apart, which get_records_diff_power_microwatts would divide a normal
+/// energy delta by, producing a bogus power spike.
 struct PowerMetrics {
-    last_request: Mutex<Duration>,
-    metric_generator: Mutex<MetricGenerator>,
+    last_request: Duration,
+    metric_generator: MetricGenerator,
 }
 
 #[tokio::main]
@@ -106,10 +111,10 @@ async fn run_server(
     metric_generator: MetricGenerator,
     endpoint_suffix: &str,
 ) {
-    let power_metrics = PowerMetrics {
-        last_request: Mutex::new(Duration::new(0, 0)),
-        metric_generator: Mutex::new(metric_generator),
-    };
+    let power_metrics = Mutex::new(PowerMetrics {
+        last_request: Duration::new(0, 0),
+        metric_generator,
+    });
     let context = Arc::new(power_metrics);
     let make_svc = make_service_fn(move |_| {
         let ctx = context.clone();
@@ -153,75 +158,72 @@ fn push_metric(
 /// Handles requests and returns data formated for Prometheus.
 async fn show_metrics(
     req: Request<Body>,
-    context: Arc<PowerMetrics>,
+    context: Arc<Mutex<PowerMetrics>>,
     suffix: String,
 ) -> Result<Response<Body>, Infallible> {
     trace!("{}", req.uri());
     let mut body = String::new();
     if req.uri().path() == format!("/{}", suffix) {
         let now = current_system_time_since_epoch();
-        match context.last_request.lock() {
-            Ok(mut last_request) => {
-                match context.metric_generator.lock() {
-                    Ok(mut metric_generator) => {
-                        if now - (*last_request) > Duration::from_secs(2) {
-                            {
-                                info!(
-                                    "{}: Refresh topology",
-                                    Utc::now().format("%Y-%m-%dT%H:%M:%S")
-                                );
-                                metric_generator
-                                    .topology
-                                    .proc_tracker
-                                    .clean_terminated_process_records_vectors();
-                                metric_generator.topology.refresh();
-                            }
-                        }
-                        *last_request = now;
+        match context.lock() {
+            Ok(mut power_metrics) => {
+                let PowerMetrics {
+                    last_request,
+                    metric_generator,
+                } = &mut *power_metrics;
 
-                        info!("{}: Refresh data", Utc::now().format("%Y-%m-%dT%H:%M:%S"));
-
-                        metric_generator.gen_all_metrics();
-
-                        let mut metrics_pushed: Vec<String> = vec![];
-
-                        // Send all data
-                        for msg in metric_generator.pop_metrics() {
-                            let mut attributes: Option<&HashMap<String, String>> = None;
-                            if !msg.attributes.is_empty() {
-                                attributes = Some(&msg.attributes);
-                            }
-
-                            let value = match msg.metric_value {
-                                // MetricValueType::IntSigned(value) => event.set_metric_sint64(value),
-                                // MetricValueType::Float(value) => event.set_metric_f(value),
-                                //MetricValueType::FloatDouble(value) => value.to_string(),
-                                MetricValueType::IntUnsigned(value) => value.to_string(),
-                                MetricValueType::Text(ref value) => value.to_string(),
-                            };
-
-                            let mut should_i_add_help = true;
-
-                            if metrics_pushed.contains(&msg.name) {
-                                should_i_add_help = false;
-                            } else {
-                                metrics_pushed.insert(0, msg.name.clone());
-                            }
-
-                            body = push_metric(
-                                body,
-                                msg.description.clone(),
-                                msg.metric_type.clone(),
-                                msg.name.clone(),
-                                utils::format_prometheus_metric(&msg.name, &value, attributes),
-                                should_i_add_help,
-                            );
-                        }
+                if now - *last_request > Duration::from_secs(2) {
+                    {
+                        info!(
+                            "{}: Refresh topology",
+                            Utc::now().format("%Y-%m-%dT%H:%M:%S")
+                        );
+                        metric_generator
+                            .topology
+                            .proc_tracker
+                            .clean_terminated_process_records_vectors();
+                        metric_generator.topology.refresh();
                     }
-                    Err(e) => {
-                        error!("Error while locking metric_generator: {e:?}");
-                        error!("Error while locking metric_generator: {}", e.to_string());
+                }
+                *last_request = now;
+
+                info!("{}: Refresh data", Utc::now().format("%Y-%m-%dT%H:%M:%S"));
+
+                metric_generator.gen_all_metrics();
+
+                let mut metrics_pushed: Vec<String> = vec![];
+
+                // Send all data
+                for msg in metric_generator.pop_metrics() {
+                    let mut attributes: Option<&HashMap<String, String>> = None;
+                    if !msg.attributes.is_empty() {
+                        attributes = Some(&msg.attributes);
                     }
+
+                    let value = match msg.metric_value {
+                        // MetricValueType::IntSigned(value) => event.set_metric_sint64(value),
+                        // MetricValueType::Float(value) => event.set_metric_f(value),
+                        //MetricValueType::FloatDouble(value) => value.to_string(),
+                        MetricValueType::IntUnsigned(value) => value.to_string(),
+                        MetricValueType::Text(ref value) => value.to_string(),
+                    };
+
+                    let mut should_i_add_help = true;
+
+                    if metrics_pushed.contains(&msg.name) {
+                        should_i_add_help = false;
+                    } else {
+                        metrics_pushed.insert(0, msg.name.clone());
+                    }
+
+                    body = push_metric(
+                        body,
+                        msg.description.clone(),
+                        msg.metric_type.clone(),
+                        msg.name.clone(),
+                        utils::format_prometheus_metric(&msg.name, &value, attributes),
+                        should_i_add_help,
+                    );
                 }
             }
             Err(e) => {
