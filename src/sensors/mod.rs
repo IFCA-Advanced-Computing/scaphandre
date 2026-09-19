@@ -1694,9 +1694,8 @@ mod tests {
     /// `Record::timestamp` comes from `SystemTime`, not a monotonic clock: a clock
     /// adjustment between two consecutive records can make their diff implausibly
     /// small, which used to blow up `get_records_diff_power_microwatts` into a bogus
-    /// power spike (observed in production as ~170 kW on a host that normally draws
-    /// ~1 W). This locks in the fix: a too-small time_diff is discarded (`None`)
-    /// instead of being divided by.
+    /// power spike. This locks in the fix: a too-small time_diff is discarded
+    /// (`None`) instead of being divided by.
     #[test]
     fn discards_power_sample_when_time_diff_too_small() {
         let mut topo = Topology::new(HashMap::new());
@@ -1733,7 +1732,7 @@ mod tests {
     /// Same reproduction as above but against this host's *real* RAPL counter
     /// instead of synthetic values: a real ~2s energy delta with the second
     /// record's timestamp corrupted to be 0.5ms after the first one's, simulating
-    /// the clock jump seen in production. Confirms the fix discards the sample
+    /// a wall-clock adjustment. Confirms the fix discards the sample
     /// instead of computing a bogus power spike (the unpatched code returned
     /// ~54.7 kW here on this machine). Needs root (reads
     /// /sys/class/powercap/.../energy_uj) and real RAPL hardware, so it's
